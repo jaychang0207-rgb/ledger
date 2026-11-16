@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>小帳本</title>
+<meta name="description" content="個人記帳：記錄每日收支、按月查看總計、分類占比與預算進度。資料只存在這台裝置。">
+<meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#12141c" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="小帳本">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>小帳本</h1>
+      <div class="sub" id="status">讀取中…</div>
+    </div>
+    <div class="month">
+      <button class="icon-btn" id="prev" aria-label="上個月">‹</button>
+      <button class="month-label num" id="monthLabel" aria-label="回到本月">—</button>
+      <button class="icon-btn" id="next" aria-label="下個月">›</button>
+    </div>
+  </header>
+
+  <div id="update" class="banner" hidden>
+    <span>有新版本可以使用。</span>
+    <button class="ghost" id="updateBtn" type="button">立即更新</button>
+  </div>
+  <div id="backupNag" class="banner" hidden>
+    <span id="backupNagText">資料只存在這支手機，建議定期備份。</span>
+    <button class="ghost" id="nagBackup" type="button">立即備份</button>
+  </div>
+
+  <section class="totals" aria-label="本月總計">
+    <div class="total out"><span class="label">支出</span><span class="val num" id="tOut">NT$0</span></div>
+    <div class="total in"><span class="label">收入</span><span class="val num" id="tIn">NT$0</span></div>
+    <div class="total bal"><span class="label">結餘</span><span class="val num" id="tBal">NT$0</span></div>
+  </section>
+
+  <form class="entry" id="form" autocomplete="off" novalidate>
+    <div class="entry-head">
+      <div class="seg" role="group" aria-label="類型">
+        <button type="button" data-t="out" aria-pressed="true">支出</button>
+        <button type="button" data-t="in" aria-pressed="false">收入</button>
+      </div>
+      <span class="muted" id="editHint" hidden>正在編輯 · <button type="button" class="link" id="cancelEdit">取消</button></span>
+    </div>
+    <div class="row">
+      <label class="field amt"><span>金額 (NT$)</span><input id="fAmount" type="number" inputmode="numeric" pattern="[0-9]*" min="0" step="1" placeholder="0"></label>
+      <label class="field"><span>日期</span><input id="fDate" type="date"></label>
+      <label class="field"><span>分類</span><select id="fCat"></select></label>
+    </div>
+    <div class="chips" id="chips" aria-label="快速選分類"></div>
+    <div class="row2">
+      <label class="field"><span>備註</span><input id="fNote" type="text" maxlength="80" placeholder="例如：午餐便當、捷運儲值" enterkeyhint="done"></label>
+      <button class="primary" id="submit" type="submit">記一筆</button>
+    </div>
+    <div class="msg" id="msg" role="status"></div>
+  </form>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>明細</h2>
+      <div id="list" class="panel"></div>
+    </section>
+    <aside class="side">
+      <section class="card">
+        <h2>每月預算</h2>
+        <div class="budget-line"><span>已花 <b class="num" id="bSpent">NT$0</b></span><span class="muted" id="bLeft">尚未設定預算</span></div>
+        <div class="budget-meter"><i id="bMeter"></i></div>
+        <div class="inline-edit">
+          <input id="bInput" type="number" min="0" step="100" inputmode="numeric" pattern="[0-9]*" placeholder="例如 25000" aria-label="每月預算金額">
+          <button class="ghost" id="bSave" type="button">儲存</button>
+        </div>
+      </section>
+      <section class="card">
+        <h2>支出分類</h2>
+        <div id="cats" class="cats"></div>
+      </section>
+      <section class="card">
+        <h2>備份與匯出</h2>
+        <p class="muted small">紀錄只存在這支手機。換手機或刪掉 App 之前，請先備份，之後可以用「還原備份」匯回來。</p>
+        <div class="btns">
+          <button class="ghost" id="backup" type="button">備份全部資料</button>
+          <button class="ghost" id="restore" type="button">還原備份</button>
+          <button class="ghost" id="csv" type="button">匯出本月 CSV</button>
+        </div>
+        <input type="file" id="restoreFile" accept=".json,application/json" hidden>
+        <div id="restoreConfirm" class="confirm" hidden></div>
+        <p class="muted small" id="lastBackup"></p>
+      </section>
+    </aside>
+  </div>
+
+  <section class="install card" id="install" hidden>
+    <h2>安裝到主畫面</h2>
+    <p class="small">在 Safari 點下方的 <b>分享</b> 按鈕，再選 <b>加入主畫面</b>。之後就能從主畫面全螢幕打開，沒有網路也能用。</p>
+  </section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
