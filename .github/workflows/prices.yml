@@ -1,0 +1,39 @@
+name: 更新股價
+
+on:
+  schedule:
+    # 週一到週五，台灣時間 14:47、16:23、18:41（收盤資料約 14:30 後公布，後兩次是補抓）
+    - cron: "47 6 * * 1-5"
+    - cron: "23 8 * * 1-5"
+    - cron: "41 10 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 抓取上市、上櫃收盤價
+        run: python scripts/update_prices.py
+      - name: 有變動就提交
+        run: |
+          if git diff --quiet -- data/prices.json; then
+            echo "股價沒有變動"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prices.json
+          git commit -m "更新股價 $(TZ=Asia/Taipei date +%Y-%m-%d)"
+          git push

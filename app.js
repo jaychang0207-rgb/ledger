@@ -154,6 +154,7 @@
   const S = {
     tx: [], accounts: [], trades: [], trips: [], tripx: [],
     budget: 0, lastBackup: null, quotes: {}, feeCfg: { discount: 1, minFee: 20 },
+    market: {}, marketAt: null, priceSync: { busy: false, error: false, lastTry: 0 },
     tab: "ledger", openTrip: null,
   };
   try { const t = localStorage.getItem("tab"); if (VIEW_TITLES[t]) S.tab = t; } catch {}
@@ -221,9 +222,12 @@
     }
     const list = Object.values(m);
     for (const p of list) {
+      if (p.name === p.symbol && S.market[p.symbol]) p.name = S.market[p.symbol][0] || p.name;
       const q = S.quotes[p.symbol];
       p.price = q ? q.price : null;
       p.quoteAt = q ? q.at : null;
+      p.quoteDate = q ? q.date || (q.at || "").slice(0, 10) : null;
+      p.quoteAuto = !!(q && q.auto);
       p.avg = p.shares ? p.cost / p.shares : 0;
       if (p.shares > 0 && p.price != null) {
         p.mv = p.shares * p.price;
@@ -258,6 +262,7 @@
       if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
     });
     $("viewTitle").textContent = VIEW_TITLES[tab];
+    if (tab === "stocks") setTimeout(() => syncPrices(false), 0);
     render();
     window.scrollTo(0, 0);
   }
@@ -597,6 +602,103 @@
   /* =====================================================================
      股票 (stocks)
      ===================================================================== */
+  /* ---------- Live closing prices ----------
+     1. data/prices.json, refreshed after each close by a GitHub Action (上市 + 上櫃)
+     2. the same file straight from GitHub, in case the Pages copy lags behind
+     3. 證交所 directly (上市 only), the freshest source for listed stocks */
+  const PRICE_SOURCES = (() => {
+    const list = [{ kind: "json", url: "data/prices.json" }];
+    const host = location.hostname, seg = location.pathname.split("/").filter(Boolean)[0];
+    if (host.endsWith(".github.io") && seg) list.push({ kind: "json", url: `https://raw.githubusercontent.com/${host.split(".")[0]}/${seg}/main/data/prices.json` });
+    list.push({ kind: "twse", url: "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=csv" });
+    return list;
+  })();
+  const SYNC_EVERY_MS = 20 * 60 * 1000;
+
+  function rocToIso(s) {
+    s = String(s).trim().replace(/\//g, "");
+    if (/^20\d{6}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}`;
+    return `${parseInt(s.slice(0, -4), 10) + 1911}-${s.slice(-4, -2)}-${s.slice(-2)}`;
+  }
+  function parseTwseCsv(text) {
+    const out = {};
+    for (const line of text.split(/\r?\n/).slice(1)) {
+      const cells = [...line.matchAll(/"((?:[^"]|"")*)"|([^,]+)/g)].map((m) => (m[1] ?? m[2] ?? "").trim());
+      if (cells.length < 9) continue;
+      const code = cells[1], close = parseFloat(cells[8].replace(/,/g, ""));
+      if (/^(\d{4}|00\d{2,4}[A-Z]?)$/.test(code) && close > 0) out[code] = [cells[2], close, rocToIso(cells[0]), "twse"];
+    }
+    return out;
+  }
+  async function fetchSource(src) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    try {
+      const sep = src.url.includes("?") ? "&" : "?";
+      const r = await fetch(src.url + sep + "_=" + Date.now(), { cache: "no-store", signal: ctl.signal });
+      if (!r.ok) throw new Error(r.status);
+      if (src.kind === "twse") return parseTwseCsv(await r.text());
+      const d = await r.json();
+      return d && d.prices && typeof d.prices === "object" ? d.prices : {};
+    } finally { clearTimeout(timer); }
+  }
+
+  /** Fetch every source, keep the newest close per code, and apply it to quotes. */
+  async function syncPrices(force) {
+    const ps = S.priceSync;
+    if (ps.busy || (!force && Date.now() - ps.lastTry < SYNC_EVERY_MS)) return;
+    if (navigator.onLine === false) { ps.error = true; if (S.tab === "stocks") render(); return; }
+    ps.busy = true; ps.lastTry = Date.now();
+    if (S.tab === "stocks") render();
+    const results = await Promise.allSettled(PRICE_SOURCES.map(fetchSource));
+    const market = { ...S.market };
+    let got = 0;
+    for (const r of results) {
+      if (r.status !== "fulfilled") continue;
+      for (const [code, v] of Object.entries(r.value)) {
+        if (!Array.isArray(v) || !(Number(v[1]) > 0) || !isDate(v[2])) continue;
+        got++;
+        if (!market[code] || v[2] >= market[code][2]) market[code] = [String(v[0] || ""), Number(v[1]), v[2], v[3] || ""];
+      }
+    }
+    ps.busy = false;
+    ps.error = got === 0;
+    if (got) {
+      S.market = market; S.marketAt = new Date().toISOString();
+      await Promise.all([store.setSetting("market", market), store.setSetting("marketAt", S.marketAt)]).catch(() => {});
+      await applyMarket();
+    }
+    render();
+  }
+
+  /** Copy the newest known close onto each held symbol's quote (a manual price stays until a close for that day or later arrives). */
+  async function applyMarket() {
+    const quotes = { ...S.quotes };
+    let changed = 0;
+    for (const sym of new Set(S.trades.map((t) => t.symbol))) {
+      const m = S.market[sym]; if (!m) continue;
+      const q = quotes[sym], qDate = q ? q.date || (q.at || "").slice(0, 10) : "";
+      if (!q || m[2] >= qDate) {
+        if (!q || q.price !== m[1] || q.date !== m[2] || !q.auto) { changed++; quotes[sym] = { price: m[1], at: S.marketAt || new Date().toISOString(), date: m[2], auto: true }; }
+      }
+    }
+    if (changed) { S.quotes = quotes; await store.setSetting("quotes", quotes).catch(() => {}); }
+  }
+  window.addEventListener("online", () => syncPrices(true));
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") syncPrices(false); });
+
+  function priceStatus() {
+    const ps = S.priceSync;
+    if (ps.busy) return "正在更新股價…";
+    const dates = Object.values(S.market).map((m) => m[2]).sort();
+    const latest = dates[dates.length - 1];
+    if (ps.error) return latest ? `無法連線，顯示 ${shortDate(latest)} 的收盤價` : "無法連線，請確認網路後再試";
+    if (!latest) return "還沒有抓過股價";
+    const mins = S.marketAt ? Math.round((Date.now() - new Date(S.marketAt)) / 60000) : null;
+    const ago = mins == null ? "" : mins < 1 ? " · 剛剛更新" : mins < 60 ? ` · ${mins} 分鐘前更新` : "";
+    return `最新收盤價：${shortDate(latest)}${ago}`;
+  }
+
   function renderStocks() {
     const v = $("view-stocks"); v.innerHTML = "";
     const list = portfolio();
@@ -608,7 +710,7 @@
       h("div", { class: "split" },
         h("span", {}, "報酬率 ", h("b", { class: "num " + plClass(s.unreal), text: s.invested ? fmtPct(s.ret) : "—" })),
         h("span", {}, "持有 ", h("b", { class: "num", text: `${s.held.length} 檔` }))),
-      s.missing ? h("span", { class: "muted", text: `${s.missing} 檔還沒輸入現價，沒算進未實現損益。點持股就能更新。` }) : null));
+      s.missing ? h("span", { class: "muted", text: `${s.missing} 檔抓不到股價，沒算進未實現損益。點持股可以手動輸入。` }) : null));
 
     v.append(h("section", { class: "totals two" },
       h("div", { class: "total" }, h("span", { class: "label", text: "投入成本" }), h("span", { class: "val num", text: fmt(s.invested) }), h("span", { class: "hint", text: "目前持股，含買進手續費" })),
@@ -619,7 +721,9 @@
 
     v.append(h("div", { class: "btns" },
       h("button", { type: "button", class: "primary", text: "＋ 新增交易", onclick: () => tradeSheet(null) }),
+      h("button", { type: "button", class: "ghost", text: S.priceSync.busy ? "更新中…" : "更新股價", disabled: S.priceSync.busy, onclick: () => syncPrices(true) }),
       h("button", { type: "button", class: "ghost", text: "手續費設定", onclick: feeSheet })));
+    v.append(h("p", { class: "small " + (S.priceSync.error ? "" : "muted"), style: S.priceSync.error ? "color:var(--out)" : "", text: priceStatus() }));
 
     v.append(h("h2", { text: "持股" }));
     if (!s.held.length) {
@@ -628,17 +732,18 @@
     } else {
       const box = h("div", { class: "panel" });
       for (const p of s.held.sort((a, b) => (b.mv ?? b.cost) - (a.mv ?? a.cost))) {
-        const stale = p.quoteAt && daysBetween(p.quoteAt.slice(0, 10), today()) > 7;
+        const stale = p.quoteDate && daysBetween(p.quoteDate, today()) > 7;
+        const priceLabel = p.quoteDate ? `現價（${shortDate(p.quoteDate)}${p.quoteAuto ? " 收盤" : " 手動"}）` : "現價";
         box.append(h("button", { type: "button", class: "holding", onclick: () => holdingSheet(p.symbol) },
           h("div", { class: "h-top" },
             h("span", { class: "h-name" }, h("span", { class: "num", text: p.symbol }), p.name !== p.symbol ? p.name : ""),
             p.unreal == null
-              ? h("span", { class: "h-pl" }, h("span", { class: "pill stale", text: "輸入現價" }))
+              ? h("span", { class: "h-pl" }, h("span", { class: "pill stale", text: "沒有股價" }))
               : h("span", { class: "h-pl num " + plClass(p.unreal) }, fmtSigned(p.unreal), h("small", { text: fmtPct(p.ret) }))),
           h("div", { class: "kv" },
             h("div", {}, h("span", { text: "股數" }), h("b", { text: fmtShares(p.shares) })),
             h("div", {}, h("span", { text: "均價" }), h("b", { text: fmtPrice(round2(p.avg)) })),
-            h("div", {}, h("span", { text: stale ? "現價（已過一週）" : "現價" }), h("b", { text: fmtPrice(p.price) })),
+            h("div", {}, h("span", { text: stale ? priceLabel + "⚠︎" : priceLabel }), h("b", { text: fmtPrice(p.price) })),
             h("div", {}, h("span", { text: "市值" }), h("b", { text: p.mv == null ? "—" : fmt(p.mv) })))));
       }
       v.append(box);
@@ -652,7 +757,7 @@
         h("span", { class: "right" }, h("span", { class: "num " + plClass(p.realized), text: fmtSigned(p.realized) }), h("span", { class: "meta", text: "已實現" }))))));
     }
 
-    v.append(h("p", { class: "small muted", text: `未實現損益已扣掉預估的賣出手續費和證交稅（股票 0.3%，00 開頭的 ETF 0.1%），跟券商 App 的「預估損益」算法相同。顏色依台股習慣：紅色是賺、綠色是賠。現價要自己輸入，App 不會連網抓股價。` }));
+    v.append(h("p", { class: "small muted", text: `未實現損益已扣掉預估的賣出手續費和證交稅（股票 0.3%，00 開頭的 ETF 0.1%），跟券商 App 的「預估損益」算法相同。顏色依台股習慣：紅色是賺、綠色是賠。現價用證交所、櫃買中心公布的收盤價（上市、上櫃都有），每天收盤後更新；盤中想看即時價，可以點持股手動輸入，收盤後會自動換回收盤價。` }));
   }
 
   function holdingSheet(symbol) {
@@ -664,14 +769,16 @@
     saveQ.onclick = async () => {
       const x = num(price.value);
       if (!(x > 0)) { m.textContent = "請輸入大於 0 的價格。"; m.classList.add("err"); return; }
-      S.quotes = { ...S.quotes, [symbol]: { price: x, at: new Date().toISOString() } };
+      S.quotes = { ...S.quotes, [symbol]: { price: x, at: new Date().toISOString(), date: today(), auto: false } };
       await store.setSetting("quotes", S.quotes);
       render(); holdingSheet(symbol); toast(`${symbol} 現價更新為 ${fmtPrice(x)}`);
     };
     const body = [];
     if (p.shares > 0) {
       body.push(h("div", { class: "inline-edit" }, price, saveQ), m);
-      if (p.quoteAt) body.push(h("p", { class: "small muted", text: `上次更新：${new Date(p.quoteAt).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}` }));
+      if (p.quoteAt) body.push(h("p", { class: "small muted", text: p.quoteAuto
+        ? `${shortDate(p.quoteDate)} 收盤價，自動更新。盤中可以在上面輸入即時價，收盤後會換回收盤價。`
+        : `手動輸入於 ${new Date(p.quoteAt).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}，下次收盤價出來後會自動更新。` }));
       body.push(h("div", { class: "kv" },
         h("div", {}, h("span", { text: "股數" }), h("b", { text: fmtShares(p.shares) })),
         h("div", {}, h("span", { text: "均價" }), h("b", { text: fmtPrice(round2(p.avg)) })),
@@ -732,11 +839,16 @@
     const fAmt = field("股利金額 (NT$)", amount, "實際入帳金額（已扣二代健保補充保費和匯費）");
     const fAcc = field("交割帳戶", acc, "買進會從這個帳戶扣款，賣出和股利會入帳到這裡。");
 
+    const closeHint = h("span", { class: "help" });
     symbol.addEventListener("input", () => {
-      const p = symbols.find((x) => x.symbol === symbol.value.trim().toUpperCase());
-      if (p && !name.value) name.value = p.name;
+      const code = symbol.value.trim().toUpperCase();
+      const p = symbols.find((x) => x.symbol === code), mk = S.market[code];
+      if (!name.dataset.typed) name.value = p ? p.name : mk ? mk[0] : "";
+      closeHint.textContent = mk ? `${mk[0]} · ${shortDate(mk[2])} 收盤 ${fmtPrice(mk[1])}` : "";
       update();
     });
+    name.addEventListener("input", () => { name.dataset.typed = name.value ? "1" : ""; });
+    if (t || preset.name) name.dataset.typed = "1";
     fee.addEventListener("input", () => { feeTouched = fee.value !== ""; update(); });
     tax.addEventListener("input", () => { taxTouched = tax.value !== ""; update(); });
     shares.addEventListener("input", update);
@@ -789,13 +901,14 @@
       }
       try {
         await save("trades", rec);
+        await applyMarket();
         closeSheet(); render(); toast(editing ? "已更新交易" : `已新增 ${TRADE_KINDS[kind]} ${sym}`);
       } catch { err("沒有存成功，請再試一次。"); }
     };
 
     const body = [
       seg,
-      h("div", { class: "row-2" }, field("代號", symbol), field("名稱", name)), dl,
+      h("div", { class: "row-2" }, h("label", { class: "field" }, h("span", { text: "代號" }), symbol, closeHint), field("名稱", name)), dl,
       field("日期", date),
       h("div", { class: "row-2" }, fShares, fPrice), fAmt,
       h("div", { class: "row-2" }, fFee, fTax),
@@ -1236,9 +1349,10 @@
   }
 
   async function loadAll() {
-    const [tx, accounts, trades, trips, tripx, budget, lastBackup, quotes, feeCfg] = await Promise.all([
+    const [tx, accounts, trades, trips, tripx, budget, lastBackup, quotes, feeCfg, market, marketAt] = await Promise.all([
       store.all("tx"), store.all("accounts"), store.all("trades"), store.all("trips"), store.all("tripx"),
       store.getSetting("budget"), store.getSetting("lastBackup"), store.getSetting("quotes"), store.getSetting("feeCfg"),
+      store.getSetting("market"), store.getSetting("marketAt"),
     ]);
     S.accounts = accounts || [];
     if (!S.accounts.length) {
@@ -1258,6 +1372,8 @@
     S.budget = Number(budget) || 0;
     S.lastBackup = lastBackup || null;
     S.quotes = quotes || {};
+    S.market = market && typeof market === "object" ? market : {};
+    S.marketAt = marketAt || null;
     if (feeCfg && feeCfg.discount > 0) S.feeCfg = feeCfg;
   }
 
@@ -1294,5 +1410,6 @@
     }
     fillAccountSelects();
     setTab(S.tab);
+    syncPrices(false);
   })();
 })();
