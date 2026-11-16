@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION whenever any file below changes.
-const VERSION = "ledger-v4";
+const VERSION = "ledger-v5";
 const FILES = [
   "./",
   "./index.html",

@@ -108,12 +108,12 @@
   /* =====================================================================
      Storage: IndexedDB on this device
      ===================================================================== */
-  const STORES = ["tx", "accounts", "trades", "trips", "tripx"];
+  const STORES = ["tx", "accounts", "trades", "trips", "tripx", "snaps"];
   const store = (() => {
     let dbp;
     function open() {
       dbp ||= new Promise((res, rej) => {
-        const r = indexedDB.open("ledger", 2);
+        const r = indexedDB.open("ledger", 3);
         r.onupgradeneeded = () => {
           const db = r.result;
           for (const s of STORES) if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: "id" });
@@ -152,7 +152,7 @@
      State
      ===================================================================== */
   const S = {
-    tx: [], accounts: [], trades: [], trips: [], tripx: [],
+    tx: [], accounts: [], trades: [], trips: [], tripx: [], snaps: [],
     budget: 0, lastBackup: null, quotes: {}, feeCfg: { discount: 1, minFee: 20 },
     market: {}, marketAt: null, priceSync: { busy: false, error: false, lastTry: 0 },
     tab: "ledger", openTrip: null,
@@ -202,9 +202,9 @@
   const calcFee = (amount) => (amount > 0 ? Math.max(S.feeCfg.minFee, Math.floor(amount * FEE_RATE * S.feeCfg.discount)) : 0);
 
   /** Average-cost portfolio. Pass excludeId to compute holdings without one trade (used when editing it). */
-  function portfolio(excludeId) {
+  function portfolio(excludeId, until) {
     const m = {};
-    const ts = S.trades.filter((t) => t.id !== excludeId).slice().sort(sortByDate);
+    const ts = S.trades.filter((t) => t.id !== excludeId && (!until || t.date <= until)).slice().sort(sortByDate);
     for (const t of ts) {
       const p = (m[t.symbol] ||= { symbol: t.symbol, name: t.name || t.symbol, shares: 0, cost: 0, realized: 0, dividends: 0, trades: [] });
       if (t.name) p.name = t.name;
@@ -552,8 +552,179 @@
         h("div", { class: "bars accent" }, parts.sort((a, b) => b[1] - a[1]).map(([n, x]) => barRow(n, fmt(x), x / pos)))));
     }
 
-    // this month's flow by account
+    renderHistory(v);
     v.append(h("p", { class: "small muted", text: "帳戶餘額 = 你輸入的起始餘額 + 收入 − 支出 ± 轉帳 ± 股票交割與股利。如果跟銀行 App 對不上，點那個帳戶，輸入目前實際餘額就會校正。" }));
+  }
+
+  /* ---------- 資產變化: month-end / year-end total assets ---------- */
+  const HIST = { mode: "month", sel: null };
+  try { if (localStorage.getItem("histMode") === "year") HIST.mode = "year"; } catch {}
+
+  /** Cash + stock value as of the end of `date`. Stocks are valued at cost because past prices are unknown. */
+  function estimateAt(date) {
+    let cash = S.accounts.reduce((s, a) => s + (Number(a.opening) || 0), 0);
+    const ids = new Set(S.accounts.map((a) => a.id));
+    for (const r of S.tx) {
+      if (r.date > date) continue;
+      if (r.type === "in" && ids.has(r.account)) cash += r.amount;
+      else if (r.type === "out" && ids.has(r.account)) cash -= r.amount;
+      else if (r.type === "transfer") { if (ids.has(r.account)) cash -= r.amount; if (ids.has(r.toAccount)) cash += r.amount; }
+    }
+    for (const t of S.trades) if (t.date <= date && t.account && ids.has(t.account)) cash += tradeCash(t);
+    const stock = portfolio(null, date).reduce((s, p) => s + (p.shares > 0 ? p.cost : 0), 0);
+    return { cash: Math.round(cash), stock: Math.round(stock), total: Math.round(cash + stock) };
+  }
+
+  function liveTotals() {
+    const bal = accountBalances();
+    const cash = S.accounts.reduce((s, a) => s + (bal[a.id] || 0), 0);
+    const stock = Math.round(portfolioSummary(portfolio()).mv);
+    return { cash, stock, total: cash + stock };
+  }
+
+  /** Save today's total assets once a day (overwritten while the day goes on). */
+  let snapTimer;
+  function scheduleSnapshot() {
+    clearTimeout(snapTimer);
+    snapTimer = setTimeout(async () => {
+      if (!S.tx.length && !S.trades.length && S.accounts.every((a) => !a.opening)) return;
+      const t = liveTotals(), id = today();
+      const old = S.snaps.find((x) => x.id === id);
+      if (old && old.total === t.total && old.cash === t.cash && old.stock === t.stock) return;
+      await save("snaps", { id, ...t, at: new Date().toISOString() }).catch(() => {});
+    }, 1500);
+  }
+
+  function lastDay(y, m) { return dateStr(new Date(y, m, 0)); }
+
+  /** Periods from the first record to now, each with its closing value and flows. */
+  function assetHistory(mode) {
+    const dates = [...S.tx.map((r) => r.date), ...S.trades.map((t) => t.date), ...S.snaps.map((x) => x.id)].filter(isDate).sort();
+    const now = today();
+    const first = dates[0] || now;
+    const periods = [];
+    let y = +first.slice(0, 4), m = mode === "month" ? +first.slice(5, 7) : 1;
+    const endY = +now.slice(0, 4), endM = +now.slice(5, 7);
+    while (y < endY || (y === endY && (mode === "year" || m <= endM))) {
+      const start = mode === "month" ? `${y}-${pad(m)}-01` : `${y}-01-01`;
+      const end = mode === "month" ? lastDay(y, m) : `${y}-12-31`;
+      periods.push({ key: mode === "month" ? `${y}-${pad(m)}` : String(y), y, m, start, end: end > now ? now : end, current: end >= now });
+      if (mode === "month") { m++; if (m > 12) { m = 1; y++; } } else y++;
+    }
+    const snaps = S.snaps.slice().sort((a, b) => a.id.localeCompare(b.id));
+    let prev = null;
+    for (const p of periods) {
+      const snap = [...snaps].reverse().find((x) => x.id >= p.start && x.id <= p.end);
+      if (p.current) { Object.assign(p, liveTotals()); p.kind = "live"; }
+      else if (snap) { Object.assign(p, { cash: snap.cash, stock: snap.stock, total: snap.total }); p.kind = "snap"; p.asOf = snap.id; }
+      else { Object.assign(p, estimateAt(p.end)); p.kind = "est"; }
+      p.income = 0; p.expense = 0;
+      for (const r of S.tx) if (r.date >= p.start && r.date <= p.end) { if (r.type === "in") p.income += r.amount; else if (r.type === "out") p.expense += r.amount; }
+      const before = prev ? prev.total : (() => { const d = new Date(p.start + "T00:00:00"); d.setDate(d.getDate() - 1); return estimateAt(dateStr(d)).total; })();
+      p.change = p.total - before;
+      p.pct = before > 0 ? p.change / before : null;
+      p.other = p.change - (p.income - p.expense);
+      prev = p;
+    }
+    return periods;
+  }
+
+  function compactTwd(n) {
+    const a = Math.abs(n), sign = n < 0 ? "−" : "";
+    if (a >= 1e8) return sign + +(a / 1e8).toFixed(a >= 1e9 ? 0 : 1) + "億";
+    if (a >= 1e4) return sign + +(a / 1e4).toFixed(a >= 1e6 ? 0 : 1) + "萬";
+    return sign + Math.round(a).toLocaleString("en-US");
+  }
+  function niceStep(span, count) {
+    const raw = span / count, mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+    const f = raw / mag;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag;
+  }
+
+  function historyChart(periods, selKey, onPick) {
+    const NS = "http://www.w3.org/2000/svg";
+    const s = (tag, attrs) => { const el = document.createElementNS(NS, tag); for (const k in attrs) el.setAttribute(k, attrs[k]); return el; };
+    const W = 360, H = 200, L = 44, R = 8, T = 22, B = 24;
+    const vals = periods.map((p) => p.total);
+    let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+    if (hi === lo) hi = lo + 1;
+    const step = niceStep(hi - lo, 3);
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    const yOf = (v) => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, class: "hist-chart", role: "img", "aria-label": "總資產變化長條圖" });
+    for (let v = lo; v <= hi + step / 2; v += step) {
+      const y = yOf(v);
+      svg.append(s("line", { x1: L, x2: W - R, y1: y, y2: y, class: v === 0 ? "axis" : "grid" }));
+      const t = s("text", { x: L - 6, y: y + 3.5, "text-anchor": "end", class: "tick" }); t.textContent = compactTwd(v); svg.append(t);
+    }
+    const n = periods.length, slot = (W - L - R) / n, bw = Math.max(4, Math.min(28, slot - 4));
+    const labelEvery = n > 12 ? Math.ceil(n / 12) : 1;
+    periods.forEach((p, i) => {
+      const cx = L + slot * (i + 0.5), y0 = yOf(0), y1 = yOf(p.total);
+      const top = Math.min(y0, y1), hgt = Math.max(1, Math.abs(y1 - y0)), r = Math.min(4, bw / 2, hgt);
+      const x = cx - bw / 2, up = p.total >= 0;
+      // rounded on the data end, square on the baseline
+      const d = up
+        ? `M${x},${y0} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${y0} Z`
+        : `M${x},${y0} V${top + hgt - r} Q${x},${top + hgt} ${x + r},${top + hgt} H${x + bw - r} Q${x + bw},${top + hgt} ${x + bw},${top + hgt - r} V${y0} Z`;
+      const sel = p.key === selKey;
+      svg.append(s("path", { d, class: "bar-mark" + (p.kind === "est" ? " est" : "") + (sel ? " sel" : "") }));
+      if (sel) { const t = s("text", { x: cx, y: up ? top - 6 : top + hgt + 13, "text-anchor": "middle", class: "val" }); t.textContent = compactTwd(p.total); svg.append(t); }
+      if (i % labelEvery === 0 || sel) {
+        const t = s("text", { x: cx, y: H - 7, "text-anchor": "middle", class: "tick" + (sel ? " on" : "") });
+        t.textContent = HIST.mode === "month" ? (p.m === 1 ? `${String(p.y).slice(2)}年` : `${p.m}月`) : String(p.y);
+        svg.append(t);
+      }
+      const hit = s("rect", { x: L + slot * i, y: 0, width: slot, height: H, class: "hit", tabindex: "0", role: "button", "aria-label": `${p.key} ${fmt(p.total)}` });
+      hit.addEventListener("click", () => onPick(p.key));
+      hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(p.key); } });
+      svg.append(hit);
+    });
+    return svg;
+  }
+
+  function renderHistory(container) {
+    const all = assetHistory(HIST.mode);
+    const shown = HIST.mode === "month" ? all.slice(-12) : all;
+    if (!shown.some((p) => p.key === HIST.sel)) HIST.sel = shown[shown.length - 1]?.key;
+    const p = all.find((x) => x.key === HIST.sel);
+    const label = (q) => (HIST.mode === "month" ? `${q.y} 年 ${q.m} 月` : `${q.y} 年`);
+    const seg = h("div", { class: "seg", role: "group", "aria-label": "期間" },
+      [["month", "按月"], ["year", "按年"]].map(([k, t]) => h("button", { type: "button", "aria-pressed": String(HIST.mode === k), text: t,
+        onclick: () => { HIST.mode = k; HIST.sel = null; try { localStorage.setItem("histMode", k); } catch {} render(); } })));
+    const pick = (key) => { HIST.sel = key; render(); };
+    const detail = !p ? null : h("div", { class: "hist-detail" },
+      h("div", { class: "hist-head" },
+        h("div", {}, h("div", { class: "muted", text: label(p) + (p.kind === "live" ? "（到今天）" : p.kind === "est" ? "（估算）" : "") }),
+          h("div", { class: "num", style: "font-size:24px;font-weight:600", text: fmt(p.total) })),
+        h("div", { class: "num " + plClass(p.change), style: "text-align:right;font-weight:600" }, fmtSigned(p.change),
+          h("div", { class: "small", text: p.pct == null ? "" : fmtPct(p.pct) }))),
+      h("div", { class: "kv" },
+        h("div", {}, h("span", { text: "收入" }), h("b", { text: fmt(p.income) })),
+        h("div", {}, h("span", { text: "支出" }), h("b", { text: p.expense ? "−" + fmt(p.expense) : fmt(0) })),
+        h("div", {}, h("span", { text: "收支結餘" }), h("b", { class: plClass(p.income - p.expense), text: fmtSigned(p.income - p.expense) })),
+        h("div", {}, h("span", { text: "投資與其他" }), h("b", { class: plClass(p.other), text: fmtSigned(p.other) }))),
+      h("div", { class: "kv" },
+        h("div", {}, h("span", { text: "期末現金與存款" }), h("b", { text: fmt(p.cash) })),
+        h("div", {}, h("span", { text: p.kind === "est" ? "期末股票（成本）" : "期末股票市值" }), h("b", { text: fmt(p.stock) }))),
+      p.kind === "snap" && p.asOf !== p.end ? h("p", { class: "small muted", text: `這期的數字是 ${shortDate(p.asOf)} 記錄的。` }) : null);
+
+    const table = h("div", { class: "rows" }, all.slice().reverse().slice(0, HIST.mode === "month" ? 12 : 50).map((q) =>
+      h("button", { type: "button", class: "rowbtn" + (q.key === HIST.sel ? " picked" : ""), onclick: () => pick(q.key) },
+        h("span", {}, h("span", { class: "name", text: label(q) }), q.kind === "est" ? h("span", { class: "pill", text: "估算" }) : q.kind === "live" ? h("span", { class: "pill soon", text: "本期" }) : null),
+        h("span", { class: "right" }, h("span", { class: "num", text: fmt(q.total) }), h("span", { class: "meta num " + plClass(q.change), text: fmtSigned(q.change) })))));
+
+    container.append(
+      h("div", { class: "section-head" }, h("h2", { text: "資產變化" }), seg),
+      h("section", { class: "card" },
+        all.length < 2 && all[0]?.kind === "live"
+          ? h("p", { class: "small muted", text: "這是第一個月。App 每天會自動記錄一次總資產，下個月起就能比較每月變化。" })
+          : null,
+        h("div", { class: "hist-wrap" }, historyChart(shown, HIST.sel, pick)),
+        shown.some((q) => q.kind === "est") ? h("p", { class: "small muted", text: "淺色長條是估算：那時還沒有每日紀錄，現金依記帳倒推，股票以成本計算。" }) : null,
+        detail),
+      table,
+      h("p", { class: "small muted", text: "「投資與其他」= 總資產變化 − 收支結餘，主要是股價漲跌、股利，以及你手動校正帳戶餘額的差額。" }));
   }
 
   function accountSheet(a) {
@@ -1347,7 +1518,7 @@
   async function doBackup() {
     const data = {
       app: "xiao-zhangben", version: 2, exportedAt: new Date().toISOString(),
-      tx: S.tx, accounts: S.accounts, trades: S.trades, trips: S.trips, tripx: S.tripx,
+      tx: S.tx, accounts: S.accounts, trades: S.trades, trips: S.trips, tripx: S.tripx, snaps: S.snaps,
       settings: { budget: S.budget, quotes: S.quotes, feeCfg: S.feeCfg },
     };
     const ok = await saveFile(`小帳本備份-${today()}.json`, JSON.stringify(data, null, 1), "application/json");
@@ -1383,6 +1554,8 @@
     trips: (r) => okId(r) && str(r.name, 30) && isDate(r.start) && isDate(r.end) && Number(r.rate) > 0
       ? { id: r.id, name: str(r.name, 30), start: r.start, end: r.end, currency: CURRENCIES[r.currency] ? r.currency : "TWD", rate: Number(r.rate), budget: Math.max(0, Number(r.budget) || 0), createdAt: str(r.createdAt, 40) || undefined,
         settlement: r.settlement && Array.isArray(r.settlement.txIds) && isDate(r.settlement.date) ? { date: r.settlement.date, txIds: r.settlement.txIds.filter((x) => typeof x === "string"), foreignTotal: Number(r.settlement.foreignTotal) || 0, at: str(r.settlement.at, 40) } : undefined } : null,
+    snaps: (r) => r && isDate(r.id) && Number.isFinite(Number(r.total))
+      ? { id: r.id, cash: Math.round(Number(r.cash) || 0), stock: Math.round(Number(r.stock) || 0), total: Math.round(Number(r.total)), at: str(r.at, 40) } : null,
     tripx: (r) => okId(r) && typeof r.tripId === "string" && Number(r.amount) > 0 && isDate(r.date)
       ? { id: r.id, tripId: r.tripId, amount: round2(Number(r.amount)), date: r.date, category: str(r.category, 20) || "其他", pay: str(r.pay, 20), note: str(r.note), createdAt: str(r.createdAt, 40) || undefined } : null,
   };
@@ -1410,7 +1583,7 @@
       setTimeout(() => { box.hidden = true; }, 6000);
       return;
     }
-    const parts = [["tx", "筆記帳"], ["accounts", "個帳戶"], ["trades", "筆股票交易"], ["trips", "趟旅程"], ["tripx", "筆旅費"]]
+    const parts = [["tx", "筆記帳"], ["accounts", "個帳戶"], ["trades", "筆股票交易"], ["trips", "趟旅程"], ["tripx", "筆旅費"], ["snaps", "天資產紀錄"]]
       .filter(([k]) => incoming[k].length).map(([k, t]) => `${incoming[k].length} ${t}`).join("、");
     const yes = h("button", { type: "button", class: "primary", text: "還原" });
     const no = h("button", { type: "button", class: "ghost", text: "取消", onclick: () => { box.hidden = true; } });
@@ -1428,6 +1601,7 @@
         }
         if (st.feeCfg && Number(st.feeCfg.discount) > 0) await store.setSetting("feeCfg", { discount: Number(st.feeCfg.discount), minFee: Math.max(0, Number(st.feeCfg.minFee) || 0) });
         await loadAll();
+        await applyMarket();
         box.hidden = true; fillAccountSelects(); render(); toast(`已還原 ${total} 項資料`);
       } catch { box.innerHTML = ""; box.append(h("div", { text: "還原失敗，請再試一次。" })); }
     };
@@ -1437,6 +1611,7 @@
      Render + boot
      ===================================================================== */
   function render() {
+    scheduleSnapshot();
     const n = S.tx.length + S.trades.length + S.tripx.length;
     $("status").textContent = `共 ${n} 筆 · 存在這台裝置`;
     if (S.tab === "ledger") renderLedger();
@@ -1447,8 +1622,8 @@
   }
 
   async function loadAll() {
-    const [tx, accounts, trades, trips, tripx, budget, lastBackup, quotes, feeCfg, market, marketAt] = await Promise.all([
-      store.all("tx"), store.all("accounts"), store.all("trades"), store.all("trips"), store.all("tripx"),
+    const [tx, accounts, trades, trips, tripx, snaps, budget, lastBackup, quotes, feeCfg, market, marketAt] = await Promise.all([
+      store.all("tx"), store.all("accounts"), store.all("trades"), store.all("trips"), store.all("tripx"), store.all("snaps"),
       store.getSetting("budget"), store.getSetting("lastBackup"), store.getSetting("quotes"), store.getSetting("feeCfg"),
       store.getSetting("market"), store.getSetting("marketAt"),
     ]);
@@ -1467,6 +1642,7 @@
     S.trades = trades || [];
     S.trips = trips || [];
     S.tripx = tripx || [];
+    S.snaps = snaps || [];
     S.budget = Number(budget) || 0;
     S.lastBackup = lastBackup || null;
     S.quotes = quotes || {};
