@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION whenever any file below changes.
-const VERSION = "ledger-v1";
+const VERSION = "ledger-v2";
 const FILES = [
   "./",
   "./index.html",
@@ -13,7 +13,8 @@ const FILES = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(FILES)));
+  // cache: "reload" skips the browser's HTTP cache, so an update never stores stale copies of the old files.
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(FILES.map((u) => new Request(u, { cache: "reload" })))));
 });
 
 self.addEventListener("activate", (e) => {
