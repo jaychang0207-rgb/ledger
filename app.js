@@ -1046,7 +1046,9 @@
     const back = h("button", { type: "button", class: "back", text: "‹ 所有旅程", onclick: () => { S.openTrip = null; render(); } });
     const head = h("div", { class: "section-head" },
       h("div", {}, h("div", { style: "font-size:20px;font-weight:700", id: "tName" }), h("div", { class: "muted", id: "tDates" })),
-      h("button", { type: "button", class: "ghost", text: "旅程設定", onclick: () => tripSheet(trip) }));
+      h("div", { class: "btns" },
+        h("button", { type: "button", class: "ghost", id: "tSettleBtn", text: "回國結算", onclick: () => settleSheet(S.trips.find((x) => x.id === trip.id) || trip) }),
+        h("button", { type: "button", class: "ghost", text: "旅程設定", onclick: () => tripSheet(S.trips.find((x) => x.id === trip.id) || trip) })));
 
     const summary = h("section", { class: "hero", id: "tSummary" });
     const listBox = h("div", { class: "panel", id: "tList" });
@@ -1091,6 +1093,7 @@
   }
 
   function renderTripData(tripArg) {
+    $("status").textContent = `共 ${S.tx.length + S.trades.length + S.tripx.length} 筆 · 存在這台裝置`;
     const trip = S.trips.find((x) => x.id === tripArg.id) || tripArg;
     const code = trip.currency, isTWD = code === "TWD";
     const rows = S.tripx.filter((x) => x.tripId === trip.id);
@@ -1116,6 +1119,17 @@
         h("div", { class: "budget-line" }, h("span", { text: `預算 ${fmtCur(trip.budget, code)}` }),
           h("span", { style: rest < 0 ? "color:var(--out)" : "", text: rest >= 0 ? `剩 ${fmtCur(rest, code)}` : `超支 ${fmtCur(-rest, code)}` })),
         h("div", { class: "meter" }, h("i", { class: p > 1 ? "over" : p > 0.8 ? "warn" : "", style: `width:${Math.min(100, p * 100)}%` })));
+    }
+
+    // settlement status
+    const st = settlementOf(trip);
+    $("tSettleBtn").textContent = st ? "重新結算" : "回國結算";
+    if (st) {
+      const changed = Math.abs(st.foreignTotal - total) > 0.005;
+      sum.append(h("div", { class: "small", style: changed ? "color:var(--warn)" : "color:var(--muted)" },
+        changed
+          ? `已在 ${shortDate(st.date)} 結算，但之後旅費有變動。按「重新結算」更新日常帳本。`
+          : `已結算到日常帳本：${st.lines.map((l) => `${l.pay} ${fmt(l.twd)}（${accName(l.account)}）`).join("、") || "無"}`));
     }
 
     // list grouped by day
@@ -1212,6 +1226,89 @@
     sync();
   }
 
+  /* ---------- 回國結算: post a trip's spending into the daily ledger ---------- */
+  function settlementOf(trip) {
+    const s = trip.settlement;
+    if (!s || !Array.isArray(s.txIds)) return null;
+    const lines = S.tx.filter((r) => s.txIds.includes(r.id)).map((r) => ({ pay: r.settlePay || "旅費", twd: r.amount, account: r.account, foreign: r.settleForeign }));
+    return { ...s, lines };
+  }
+
+  function settleSheet(trip) {
+    const code = trip.currency, isTWD = code === "TWD";
+    const rows = S.tripx.filter((x) => x.tripId === trip.id);
+    const prev = settlementOf(trip);
+    if (!rows.length) { toast("這趟還沒有花費可以結算"); return; }
+    const byPay = {};
+    rows.forEach((x) => { const k = x.pay || "其他"; byPay[k] = (byPay[k] || 0) + x.amount; });
+    const accs = accountsSorted();
+    const cashAcc = (accs.find((a) => a.kind === "cash") || accs[0]).id;
+    const bankAcc = (accs.find((a) => a.kind === "bank") || accs[0]).id;
+    const prevBy = {};
+    if (prev) for (const l of prev.lines) prevBy[l.pay] = l;
+
+    const lines = Object.entries(byPay).sort((a, b) => b[1] - a[1]).map(([pay, amt]) => {
+      const p = prevBy[pay];
+      const include = h("input", { type: "checkbox", id: "st-inc-" + pay });
+      // Cash was usually bought before the trip; if that exchange is already a 旅遊 expense, posting it again would count it twice.
+      include.checked = p ? true : pay !== "現金";
+      const same = p && Math.abs((p.foreign ?? -1) - amt) < 0.005;
+      const twd = h("input", { type: "number", id: "st-twd-" + pay, inputmode: "numeric", min: "0", step: "1", value: same ? p.twd : Math.round(amt * trip.rate) });
+      const acc = h("select", { id: "st-acc-" + pay }, options(accs.map((a) => [a.id, a.name]), p ? p.account : pay === "現金" ? cashAcc : bankAcc));
+      const box = h("div", { class: "card", style: "padding:12px" },
+        h("label", { style: "display:flex;gap:10px;align-items:center;font-weight:600" }, include,
+          h("span", {}, pay, " ", h("span", { class: "muted num", text: isTWD ? fmt(amt) : `${fmtCur(amt, code)} ≈ ${fmt(amt * trip.rate)}` }))),
+        h("div", { class: "row-2" }, field("記入日常帳本的金額 (NT$)", twd), field("從哪個帳戶扣", acc)),
+        p && !same ? h("p", { class: "small", style: "color:var(--warn)", text: `花費有變動，已重新換算（上次記 ${fmt(p.twd)}）。` }) : null,
+        pay === "現金" ? h("p", { class: "small muted", text: "出發前換匯時，如果已經在「記帳」記過「旅遊」支出，這行不要勾，否則會重複扣。" }) : null,
+        pay === "信用卡" && !isTWD ? h("p", { class: "small muted", text: "可以改成信用卡帳單上的實際台幣金額（含海外手續費）。" }) : null);
+      const sync = () => { twd.disabled = acc.disabled = !include.checked; box.style.opacity = include.checked ? "1" : ".6"; };
+      include.addEventListener("change", sync); sync();
+      return { pay, amt, include, twd, acc, box };
+    });
+
+    const date = h("input", { id: "stDate", type: "date", value: prev ? prev.date : (today() > trip.end ? today() : trip.end) });
+    const m = h("div", { class: "msg" });
+    const btn = h("button", { type: "button", class: "primary block", text: prev ? "更新結算" : "記到日常帳本" });
+    btn.onclick = async () => {
+      const err = (t) => { m.textContent = t; m.classList.add("err"); };
+      if (!isDate(date.value)) return err("請選擇日期。");
+      const picked = lines.filter((l) => l.include.checked);
+      for (const l of picked) if (!(Math.round(num(l.twd.value)) > 0)) return err(`請輸入「${l.pay}」的台幣金額。`);
+      try {
+        // Replace any earlier settlement so re-settling never double-counts.
+        if (prev) { await store.delMany("tx", prev.txIds); S.tx = S.tx.filter((r) => !prev.txIds.includes(r.id)); }
+        const now = new Date().toISOString();
+        const recs = picked.map((l) => ({
+          id: newId(), type: "out", category: "旅遊", amount: Math.round(num(l.twd.value)), date: date.value,
+          account: l.acc.value, note: `${trip.name}・${l.pay}`, tripId: trip.id, settlePay: l.pay, settleForeign: l.amt, createdAt: now,
+        }));
+        if (recs.length) await store.putMany("tx", recs);
+        S.tx.push(...recs);
+        const total = rows.reduce((s, x) => s + x.amount, 0);
+        await save("trips", { ...trip, settlement: { date: date.value, txIds: recs.map((r) => r.id), foreignTotal: total, at: now } });
+        closeSheet(); render();
+        toast(recs.length ? `已記到日常帳本，共 ${fmt(recs.reduce((s, r) => s + r.amount, 0))}` : "已結算，這次沒有記入日常帳本");
+      } catch { err("沒有存成功，請再試一次。"); }
+    };
+
+    const body = [
+      h("p", { class: "small", text: "把這趟的花費依付款方式換算成台幣，記成日常帳本的「旅遊」支出，並從你選的帳戶扣款，總資產就會跟著更新。" }),
+      ...lines.map((l) => l.box),
+      field("記帳日期", date, "通常是回國那天，或信用卡扣款那天。"),
+      btn, m,
+    ];
+    if (prev) body.push(h("hr"), h("p", { class: "small muted", text: `這趟已在 ${shortDate(prev.date)} 結算過。更新結算會取代上次記入的 ${prev.lines.length} 筆，不會重複。` }),
+      armDelete(h("button", { type: "button", class: "ghost", text: "取消結算" }), "取消結算", async () => {
+        await store.delMany("tx", prev.txIds);
+        S.tx = S.tx.filter((r) => !prev.txIds.includes(r.id));
+        const { settlement, ...rest } = trip;
+        await save("trips", rest);
+        closeSheet(); render(); toast("已取消結算，日常帳本的那幾筆已刪除");
+      }));
+    openSheet(prev ? "重新結算" : "回國結算", body);
+  }
+
   async function exportTripCsv(trip) {
     const rows = S.tripx.filter((x) => x.tripId === trip.id).sort(sortByDate);
     if (!rows.length) { toast("這趟還沒有花費可以匯出"); return; }
@@ -1278,13 +1375,14 @@
   const okId = (r) => r && typeof r.id === "string" && r.id.length > 0 && r.id.length < 100;
   const CLEAN = {
     tx: (r) => okId(r) && ["in", "out", "transfer"].includes(r.type) && Number(r.amount) > 0 && isDate(r.date)
-      ? { id: r.id, type: r.type, amount: Math.round(Number(r.amount)), date: r.date, category: str(r.category, 20) || "其他", note: str(r.note), account: str(r.account, 100) || null, toAccount: r.type === "transfer" ? str(r.toAccount, 100) : undefined, createdAt: str(r.createdAt, 40) || undefined } : null,
+      ? { id: r.id, type: r.type, amount: Math.round(Number(r.amount)), date: r.date, category: str(r.category, 20) || "其他", note: str(r.note), account: str(r.account, 100) || null, toAccount: r.type === "transfer" ? str(r.toAccount, 100) : undefined, tripId: str(r.tripId, 100) || undefined, settlePay: str(r.settlePay, 20) || undefined, settleForeign: Number(r.settleForeign) || undefined, createdAt: str(r.createdAt, 40) || undefined } : null,
     accounts: (r) => okId(r) && str(r.name, 20)
       ? { id: r.id, name: str(r.name, 20), kind: ACCOUNT_KINDS[r.kind] ? r.kind : "other", opening: Math.round(Number(r.opening) || 0), order: Number(r.order) || 0, createdAt: str(r.createdAt, 40) || undefined } : null,
     trades: (r) => okId(r) && TRADE_KINDS[r.kind] && isDate(r.date) && str(r.symbol, 10)
       ? { id: r.id, kind: r.kind, date: r.date, symbol: str(r.symbol, 10).toUpperCase(), name: str(r.name, 20), shares: Math.round(Number(r.shares) || 0), price: Number(r.price) || 0, fee: Math.round(Number(r.fee) || 0), tax: Math.round(Number(r.tax) || 0), amount: Math.round(Number(r.amount) || 0), account: str(r.account, 100) || null, note: str(r.note, 60), createdAt: str(r.createdAt, 40) || undefined } : null,
     trips: (r) => okId(r) && str(r.name, 30) && isDate(r.start) && isDate(r.end) && Number(r.rate) > 0
-      ? { id: r.id, name: str(r.name, 30), start: r.start, end: r.end, currency: CURRENCIES[r.currency] ? r.currency : "TWD", rate: Number(r.rate), budget: Math.max(0, Number(r.budget) || 0), createdAt: str(r.createdAt, 40) || undefined } : null,
+      ? { id: r.id, name: str(r.name, 30), start: r.start, end: r.end, currency: CURRENCIES[r.currency] ? r.currency : "TWD", rate: Number(r.rate), budget: Math.max(0, Number(r.budget) || 0), createdAt: str(r.createdAt, 40) || undefined,
+        settlement: r.settlement && Array.isArray(r.settlement.txIds) && isDate(r.settlement.date) ? { date: r.settlement.date, txIds: r.settlement.txIds.filter((x) => typeof x === "string"), foreignTotal: Number(r.settlement.foreignTotal) || 0, at: str(r.settlement.at, 40) } : undefined } : null,
     tripx: (r) => okId(r) && typeof r.tripId === "string" && Number(r.amount) > 0 && isDate(r.date)
       ? { id: r.id, tripId: r.tripId, amount: round2(Number(r.amount)), date: r.date, category: str(r.category, 20) || "其他", pay: str(r.pay, 20), note: str(r.note), createdAt: str(r.createdAt, 40) || undefined } : null,
   };
