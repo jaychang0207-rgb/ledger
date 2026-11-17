@@ -1,7 +1,7 @@
 // Offline cache. Bump VERSION whenever any app-shell file below changes.
 // The flight data (data/flights.json) is refreshed every week, so it is fetched network-first
 // and falls back to the cached copy when offline.
-const VERSION = "flights-v1";
+const VERSION = "flights-v2";
 const SHELL = [
   "./",
   "./index.html",
