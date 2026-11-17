@@ -61,6 +61,8 @@
   }
   function flightsBetween(n0, n1) { const out = []; for (let n = n0; n <= n1; n++) out.push(...flightsOn(n)); return out; }
   const typeOf = (tail) => (FLEET.get(tail) || {}).type || "";
+  // The aircraft actually assigned that day (e.g. 35K), not the route's allowed types (e.g. 359/35K).
+  const codeOf = (f) => (FLEET.get(f.tail) || {}).code || f.code;
   const plusDays = (f) => Math.floor(f.ret / 1440) - f.n;
   const retLabel = (f) => `${hhmm(f.ret)}${plusDays(f) ? `<span class="plus">+${plusDays(f)}</span>` : ""}`;
 
@@ -75,7 +77,7 @@
   const badge = (f) => { const s = status(f); return s ? `<span class="badge ${s[1]}">${s[0]}</span>` : ""; };
   const matches = (f, q) => {
     if (!q) return true;
-    const hay = `${f.no} ${f.dest} ${f.tail} ${f.code} ${typeOf(f.tail)} ${BASES[f.base] || ""} ${f.base}`.toUpperCase();
+    const hay = `${f.no} ${f.dest} ${f.tail} ${codeOf(f)} ${typeOf(f.tail)} ${BASES[f.base] || ""} ${f.base}`.toUpperCase();
     return q.toUpperCase().split(/\s+/).every((w) => hay.includes(w));
   };
 
@@ -117,7 +119,7 @@
         <span class="dest">${opts.date ? `${esc(fmtShort(f.n))} ` : ""}${esc(f.dest)}</span>
         <span class="meta"> ${esc(f.no)}${from} · 回 <span class="num">${retLabel(f)}</span></span>
       </span>
-      <span class="right"><span class="tail num">${esc(f.tail)}</span><span class="meta">${esc(f.code)}</span>${opts.noBadge ? "" : badge(f)}</span>
+      <span class="right"><span class="tail num">${esc(f.tail)}</span><span class="meta">${esc(codeOf(f))}</span>${opts.noBadge ? "" : badge(f)}</span>
     </button>`;
   }
   function renderDay() {
@@ -169,7 +171,7 @@
           <dt>出發</dt><dd class="num">${hhmm(f.dep)}（台灣時間）</dd>
           <dt>回到基地</dt><dd class="num">${hhmm(f.ret)}　${esc(fmtDate(Math.floor(f.ret / 1440)))}</dd>
           <dt>占用時間</dt><dd class="num">${dur(f.ret - f.dep)}</dd>
-          <dt>機型限制</dt><dd>${esc(f.code)}</dd>
+          <dt>執飛機型</dt><dd>${esc(codeOf(f))}${f.code.includes("/") ? `<span class="muted">（此航線 ${esc(f.code.split("/").join("、"))} 皆可飛）</span>` : ""}</dd>
           <dt>執飛飛機</dt><dd><button type="button" class="link num" data-tail="${esc(f.tail)}">${esc(f.tail)}</button>　${esc(ft ? ft.type : "")}</dd>
           ${f.note ? `<dt>備註</dt><dd>${esc(f.note)}</dd>` : ""}
         </dl>
