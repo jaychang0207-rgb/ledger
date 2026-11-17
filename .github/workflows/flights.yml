@@ -1,0 +1,45 @@
+name: 更新航班資料
+
+on:
+  schedule:
+    # 每週一台灣時間 00:17：把查詢範圍往後推，永遠可查到一年後
+    - cron: "17 16 * * 0"
+  push:
+    branches: [main]
+    paths:
+      - "flights/source/**"
+      - "scripts/build_flights.py"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flights
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安裝 openpyxl
+        run: pip install openpyxl==3.1.5
+      - name: 由班表產生一年內航班
+        run: python scripts/build_flights.py
+      - name: 有變動就提交
+        run: |
+          if git diff --quiet -- flights/data/flights.json; then
+            echo "航班資料沒有變動"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flights/data/flights.json
+          git commit -m "更新航班資料 $(TZ=Asia/Taipei date +%Y-%m-%d)"
+          git pull --rebase
+          git push
