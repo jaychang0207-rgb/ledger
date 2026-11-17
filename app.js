@@ -6,7 +6,7 @@
      ===================================================================== */
   const CATS = {
     out: ["餐飲", "交通", "購物", "日用品", "居住", "娛樂", "醫療", "學習", "社交", "旅遊", "其他"],
-    in: ["薪資", "獎金", "投資", "副業", "其他"],
+    in: ["薪資", "零用錢", "獎金", "投資", "副業", "其他"],
   };
   const ACCOUNT_KINDS = { cash: "現金", bank: "銀行", epay: "電子支付", other: "其他" };
   const DEFAULT_ACCOUNTS = [
@@ -34,7 +34,7 @@
   const FEE_RATE = 0.001425;
   const WD = ["日", "一", "二", "三", "四", "五", "六"];
   const BACKUP_REMIND_DAYS = 30;
-  const VIEW_TITLES = { ledger: "記帳", assets: "資產", stocks: "股票", trips: "旅遊" };
+  const VIEW_TITLES = { ledger: "記帳", income: "收入", assets: "資產", stocks: "股票", trips: "旅遊" };
 
   /* =====================================================================
      Helpers
@@ -153,7 +153,7 @@
      ===================================================================== */
   const S = {
     tx: [], accounts: [], trades: [], trips: [], tripx: [], snaps: [],
-    budget: 0, lastBackup: null, quotes: {}, feeCfg: { discount: 1, minFee: 20 },
+    budget: 0, lastBackup: null, incomeSources: [], quotes: {}, feeCfg: { discount: 1, minFee: 20 },
     market: {}, marketAt: null, priceSync: { busy: false, error: false, lastTry: 0 },
     tab: "ledger", openTrip: null,
   };
@@ -641,46 +641,55 @@
     return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag;
   }
 
-  function historyChart(periods, selKey, onPick) {
+  /** Single-series column chart. items: [{key, label, value, faded}] */
+  function columnChart(items, selKey, onPick, aria) {
     const NS = "http://www.w3.org/2000/svg";
     const s = (tag, attrs) => { const el = document.createElementNS(NS, tag); for (const k in attrs) el.setAttribute(k, attrs[k]); return el; };
     const W = 360, H = 200, L = 44, R = 8, T = 22, B = 24;
-    const vals = periods.map((p) => p.total);
+    const vals = items.map((p) => p.value);
     let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
     if (hi === lo) hi = lo + 1;
     const step = niceStep(hi - lo, 3);
     lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
     const yOf = (v) => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
-    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, class: "hist-chart", role: "img", "aria-label": "總資產變化長條圖" });
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, class: "hist-chart", role: "img", "aria-label": aria });
     for (let v = lo; v <= hi + step / 2; v += step) {
       const y = yOf(v);
       svg.append(s("line", { x1: L, x2: W - R, y1: y, y2: y, class: v === 0 ? "axis" : "grid" }));
       const t = s("text", { x: L - 6, y: y + 3.5, "text-anchor": "end", class: "tick" }); t.textContent = compactTwd(v); svg.append(t);
     }
-    const n = periods.length, slot = (W - L - R) / n, bw = Math.max(4, Math.min(28, slot - 4));
+    const n = items.length, slot = (W - L - R) / Math.max(n, 1), bw = Math.max(4, Math.min(28, slot - 4));
     const labelEvery = n > 12 ? Math.ceil(n / 12) : 1;
-    periods.forEach((p, i) => {
-      const cx = L + slot * (i + 0.5), y0 = yOf(0), y1 = yOf(p.total);
-      const top = Math.min(y0, y1), hgt = Math.max(1, Math.abs(y1 - y0)), r = Math.min(4, bw / 2, hgt);
-      const x = cx - bw / 2, up = p.total >= 0;
-      // rounded on the data end, square on the baseline
-      const d = up
-        ? `M${x},${y0} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${y0} Z`
-        : `M${x},${y0} V${top + hgt - r} Q${x},${top + hgt} ${x + r},${top + hgt} H${x + bw - r} Q${x + bw},${top + hgt} ${x + bw},${top + hgt - r} V${y0} Z`;
+    items.forEach((p, i) => {
+      const cx = L + slot * (i + 0.5), y0 = yOf(0), y1 = yOf(p.value);
+      const top = Math.min(y0, y1), hgt = Math.abs(y1 - y0), up = p.value >= 0;
       const sel = p.key === selKey;
-      svg.append(s("path", { d, class: "bar-mark" + (p.kind === "est" ? " est" : "") + (sel ? " sel" : "") }));
-      if (sel) { const t = s("text", { x: cx, y: up ? top - 6 : top + hgt + 13, "text-anchor": "middle", class: "val" }); t.textContent = compactTwd(p.total); svg.append(t); }
+      if (hgt >= 0.5) {
+        const r = Math.min(4, bw / 2, hgt), x = cx - bw / 2;
+        // rounded on the data end, square on the baseline
+        const d = up
+          ? `M${x},${y0} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${y0} Z`
+          : `M${x},${y0} V${top + hgt - r} Q${x},${top + hgt} ${x + r},${top + hgt} H${x + bw - r} Q${x + bw},${top + hgt} ${x + bw},${top + hgt - r} V${y0} Z`;
+        svg.append(s("path", { d, class: "bar-mark" + (p.faded ? " est" : "") + (sel ? " sel" : "") }));
+      }
+      if (sel) { const t = s("text", { x: cx, y: up ? top - 6 : top + hgt + 13, "text-anchor": "middle", class: "val" }); t.textContent = compactTwd(p.value); svg.append(t); }
       if (i % labelEvery === 0 || sel) {
         const t = s("text", { x: cx, y: H - 7, "text-anchor": "middle", class: "tick" + (sel ? " on" : "") });
-        t.textContent = HIST.mode === "month" ? (p.m === 1 ? `${String(p.y).slice(2)}年` : `${p.m}月`) : String(p.y);
-        svg.append(t);
+        t.textContent = p.label; svg.append(t);
       }
-      const hit = s("rect", { x: L + slot * i, y: 0, width: slot, height: H, class: "hit", tabindex: "0", role: "button", "aria-label": `${p.key} ${fmt(p.total)}` });
+      const hit = s("rect", { x: L + slot * i, y: 0, width: slot, height: H, class: "hit", tabindex: "0", role: "button", "aria-label": `${p.label} ${fmt(p.value)}` });
       hit.addEventListener("click", () => onPick(p.key));
       hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(p.key); } });
       svg.append(hit);
     });
     return svg;
+  }
+
+  function historyChart(periods, selKey, onPick) {
+    return columnChart(periods.map((p) => ({
+      key: p.key, value: p.total, faded: p.kind === "est",
+      label: HIST.mode === "month" ? (p.m === 1 ? `${String(p.y).slice(2)}年` : `${p.m}月`) : String(p.y),
+    })), selKey, onPick, "總資產變化長條圖");
   }
 
   function renderHistory(container) {
@@ -773,6 +782,196 @@
   /* =====================================================================
      股票 (stocks)
      ===================================================================== */
+  /* =====================================================================
+     收入 (income): fixed monthly income checklist + yearly analysis
+     ===================================================================== */
+  const INC = { year: new Date().getFullYear(), sel: null };
+
+  const monthOf = (d) => d.slice(0, 7);
+  const sourceDate = (src, mk) => {
+    const [y, m] = mk.split("-").map(Number);
+    const last = new Date(y, m, 0).getDate();
+    return `${mk}-${pad(Math.min(src.day || 1, last))}`;
+  };
+
+  /** Income records in month mk that belong to a fixed source. Manual records without a link count when the category is unique to that source. */
+  function receivedFor(src, mk) {
+    const sameCat = S.incomeSources.filter((x) => x.category === src.category).length === 1;
+    return S.tx.filter((r) => r.type === "in" && r.date.startsWith(mk) && (r.sourceId === src.id || (!r.sourceId && sameCat && r.category === src.category)));
+  }
+
+  function incomeByMonth(year) {
+    const months = [];
+    for (let m = 1; m <= 12; m++) {
+      const mk = `${year}-${pad(m)}`;
+      const rows = S.tx.filter((r) => r.date.startsWith(mk));
+      const income = rows.filter((r) => r.type === "in").reduce((s, r) => s + r.amount, 0);
+      const expense = rows.filter((r) => r.type === "out").reduce((s, r) => s + r.amount, 0);
+      const byCat = {};
+      rows.filter((r) => r.type === "in").forEach((r) => { byCat[r.category] = (byCat[r.category] || 0) + r.amount; });
+      months.push({ key: mk, m, income, expense, saved: income - expense, rate: income > 0 ? (income - expense) / income : null, byCat });
+    }
+    return months;
+  }
+
+  function renderIncome() {
+    const v = $("view-income"); v.innerHTML = "";
+    const nowMk = monthOf(today()), curY = +nowMk.slice(0, 4);
+    const months = incomeByMonth(INC.year);
+    const lastM = INC.year === curY ? +nowMk.slice(5, 7) : INC.year < curY ? 12 : 0;
+    const shown = months.slice(0, Math.max(lastM, 1));
+    if (!shown.some((x) => x.key === INC.sel)) INC.sel = INC.year === curY ? nowMk : shown[shown.length - 1].key;
+    const sel = months.find((x) => x.key === INC.sel);
+
+    // year nav
+    v.append(h("div", { class: "month" },
+      h("button", { type: "button", class: "icon-btn", "aria-label": "上一年", text: "‹", onclick: () => { INC.year--; INC.sel = null; render(); } }),
+      h("button", { type: "button", class: "month-label num", text: `${INC.year} 年`, onclick: () => { INC.year = curY; INC.sel = null; render(); } }),
+      h("button", { type: "button", class: "icon-btn", "aria-label": "下一年", text: "›", disabled: INC.year >= curY, onclick: () => { if (INC.year < curY) { INC.year++; INC.sel = null; render(); } } })));
+
+    // headline
+    const total = months.reduce((s, x) => s + x.income, 0);
+    const spent = months.reduce((s, x) => s + x.expense, 0);
+    // Average over months since the first record (a ledger started in September shouldn't divide by 12).
+    const firstMk = S.tx.map((r) => r.date).filter(isDate).sort()[0]?.slice(0, 7);
+    const startM = firstMk && firstMk.startsWith(String(INC.year)) ? +firstMk.slice(5, 7) : 1;
+    const avgMonths = Math.max(1, lastM - startM + 1);
+    const avg = lastM ? total / avgMonths : 0;
+    const prevSame = incomeByMonth(INC.year - 1).slice(0, lastM).reduce((s, x) => s + x.income, 0);
+    v.append(h("section", { class: "hero" },
+      h("span", { class: "label", text: INC.year === curY ? `${INC.year} 年至今收入` : `${INC.year} 年總收入` }),
+      h("span", { class: "big num", style: "color:var(--in)", text: fmt(total) }),
+      h("div", { class: "split" },
+        h("span", {}, "月平均 ", h("b", { class: "num", text: fmt(avg) })),
+        h("span", {}, "存下 ", h("b", { class: "num", text: fmtSigned(total - spent) })),
+        total > 0 ? h("span", {}, "儲蓄率 ", h("b", { class: "num", text: Math.round(((total - spent) / total) * 100) + "%" })) : null),
+      prevSame > 0 ? h("span", { class: "muted", text: `比去年同期 ${fmtSigned(total - prevSame)}（${fmtPct((total - prevSame) / prevSame)}）` }) : null));
+
+    // fixed income checklist for the selected month
+    const [sy, sm] = INC.sel.split("-").map(Number);
+    const checklist = h("section", { class: "card" },
+      h("div", { class: "section-head" }, h("h2", { text: `${sm} 月固定收入` }),
+        h("button", { type: "button", class: "ghost", text: "＋ 新增", onclick: () => sourceSheet(null) })));
+    if (!S.incomeSources.length) {
+      checklist.append(h("p", { class: "small muted", text: "把每個月固定會有的收入設定好，App 會提醒你哪些已入帳、哪些還沒，點一下就能記帳。" }),
+        h("div", { class: "btns" },
+          h("button", { type: "button", class: "ghost", text: "設定薪水", onclick: () => sourceSheet(null, { name: "薪水", category: "薪資", day: 5 }) }),
+          h("button", { type: "button", class: "ghost", text: "設定零用錢", onclick: () => sourceSheet(null, { name: "零用錢", category: "零用錢", day: 1 }) })));
+    } else {
+      const rows = h("div", { class: "rows" });
+      for (const src of S.incomeSources) {
+        const got = receivedFor(src, INC.sel);
+        const sum = got.reduce((s, r) => s + r.amount, 0);
+        const due = sourceDate(src, INC.sel);
+        const overdue = !got.length && today() > due;
+        const future = INC.sel > nowMk;
+        rows.append(h("div", { class: "rowbtn src-row" },
+          h("button", { type: "button", class: "src-name", onclick: () => sourceSheet(src) },
+            h("span", { class: "name" }, got.length ? h("span", { class: "check on", text: "✓" }) : h("span", { class: "check", text: "" }), src.name),
+            h("span", { class: "meta", text: got.length
+              ? `${got.map((r) => shortDate(r.date)).join("、")} 入帳 · ${accName(got[0].account)}`
+              : `每月 ${src.day} 日 · ${src.amount ? fmt(src.amount) : "金額不固定"} · ${accName(src.account)}` })),
+          got.length
+            ? h("span", { class: "right" }, h("span", { class: "num", style: "color:var(--in)", text: "+" + fmt(sum) }),
+                src.amount && sum !== src.amount ? h("span", { class: "meta num", text: `設定 ${fmt(src.amount)}` }) : null)
+            : future ? h("span", { class: "meta", text: "還沒到" })
+            : h("span", { class: "right" },
+                h("button", { type: "button", class: "primary small-btn", text: "記入帳", onclick: () => receiveSheet(src, INC.sel) }),
+                overdue ? h("span", { class: "meta", style: "color:var(--warn)", text: `已過 ${src.day} 日` }) : null)));
+      }
+      checklist.append(rows);
+    }
+    v.append(checklist);
+
+    // monthly chart
+    v.append(h("section", { class: "card" },
+      h("h2", { text: "每月收入" }),
+      h("div", { class: "hist-wrap" }, columnChart(shown.map((x) => ({ key: x.key, label: `${x.m}月`, value: x.income })), INC.sel, (k) => { INC.sel = k; render(); }, "每月收入長條圖")),
+      sel ? h("div", { class: "hist-detail" },
+        h("div", { class: "hist-head" },
+          h("div", {}, h("div", { class: "muted", text: `${sy} 年 ${sm} 月收入` }), h("div", { class: "num", style: "font-size:24px;font-weight:600;color:var(--in)", text: fmt(sel.income) })),
+          h("div", { style: "text-align:right" }, h("div", { class: "muted", text: "存下" }),
+            h("div", { class: "num " + plClass(sel.saved), style: "font-weight:600", text: fmtSigned(sel.saved) }),
+            h("div", { class: "small muted", text: sel.rate == null ? "" : `儲蓄率 ${Math.round(sel.rate * 100)}%` }))),
+        h("div", { class: "kv" },
+          Object.keys(sel.byCat).length
+            ? Object.entries(sel.byCat).sort((a, b) => b[1] - a[1]).map(([c, x]) => h("div", {}, h("span", { text: c }), h("b", { text: fmt(x) })))
+            : h("div", {}, h("span", { text: "收入" }), h("b", { text: fmt(0) })),
+          h("div", {}, h("span", { text: "支出" }), h("b", { text: sel.expense ? "−" + fmt(sel.expense) : fmt(0) })))) : null));
+
+    // yearly composition
+    const yearCat = {};
+    months.forEach((x) => { for (const [c, a] of Object.entries(x.byCat)) yearCat[c] = (yearCat[c] || 0) + a; });
+    const cats = Object.entries(yearCat).sort((a, b) => b[1] - a[1]);
+    if (cats.length) v.append(h("section", { class: "card" }, h("h2", { text: `${INC.year} 年收入來源` }),
+      h("div", { class: "bars accent" }, cats.map(([c, a]) => barRow(c, fmt(a), total ? a / total : 0)))));
+
+    // month list
+    v.append(h("h2", { text: "每月明細" }), h("div", { class: "rows" }, shown.slice().reverse().map((x) =>
+      h("button", { type: "button", class: "rowbtn" + (x.key === INC.sel ? " picked" : ""), onclick: () => { INC.sel = x.key; render(); window.scrollTo({ top: 0, behavior: "smooth" }); } },
+        h("span", {}, h("span", { class: "name", text: `${x.m} 月` }), h("span", { class: "meta", text: Object.entries(x.byCat).map(([c, a]) => `${c} ${compactTwd(a)}`).join(" · ") || "沒有收入" })),
+        h("span", { class: "right" }, h("span", { class: "num", style: "color:var(--in)", text: fmt(x.income) }),
+          h("span", { class: "meta num " + plClass(x.saved), text: `存下 ${fmtSigned(x.saved)}` }))))));
+    v.append(h("p", { class: "small muted", text: "收入專區統計的是「記帳」裡所有的收入。存下 = 收入 − 支出（不含轉帳和股票買賣）。" }));
+  }
+
+  function sourceSheet(src, preset = {}) {
+    const d = src || { name: "", category: "薪資", amount: 0, day: 5, account: (accountsSorted().find((a) => a.kind === "bank") || accountsSorted()[0] || {}).id, ...preset };
+    if (!src && preset.category === "零用錢") d.account = (accountsSorted().find((a) => a.kind === "cash") || accountsSorted()[0] || {}).id;
+    const name = h("input", { id: "isName", type: "text", maxlength: "20", value: d.name, placeholder: "例如：薪水、零用錢、家教" });
+    const cat = h("select", { id: "isCat" }, options(CATS.in.map((c) => [c, c]), d.category));
+    const amount = h("input", { id: "isAmt", type: "number", inputmode: "numeric", min: "0", step: "1", value: d.amount || "", placeholder: "不固定可以留空" });
+    const day = h("input", { id: "isDay", type: "number", inputmode: "numeric", min: "1", max: "31", step: "1", value: d.day || 1 });
+    const acc = h("select", { id: "isAcc" }, options(accountsSorted().map((a) => [a.id, a.name]), d.account));
+    const m = h("div", { class: "msg" });
+    const btn = h("button", { type: "button", class: "primary block", text: src ? "儲存" : "新增" });
+    btn.onclick = async () => {
+      const err = (t) => { m.textContent = t; m.classList.add("err"); };
+      const n = name.value.trim(), dd = Math.round(num(day.value));
+      if (!n) return err("請輸入名稱。");
+      if (!(dd >= 1 && dd <= 31)) return err("入帳日請填 1 到 31。");
+      const rec = { id: src ? src.id : newId(), name: n, category: cat.value, amount: Math.max(0, Math.round(num(amount.value) || 0)), day: dd, account: acc.value };
+      const list = src ? S.incomeSources.map((x) => (x.id === src.id ? rec : x)) : [...S.incomeSources, rec];
+      try { await store.setSetting("incomeSources", list); S.incomeSources = list; closeSheet(); render(); toast(src ? "已儲存" : `已新增「${n}」`); }
+      catch { err("沒有存成功，請再試一次。"); }
+    };
+    const body = [
+      field("名稱", name),
+      h("div", { class: "row-2" }, field("分類", cat), field("每月金額 (NT$)", amount)),
+      h("div", { class: "row-2" }, field("每月幾號入帳", day, "月底沒有這天時，算當月最後一天"), field("存入帳戶", acc)),
+      btn, m,
+    ];
+    if (src) body.push(h("hr"), armDelete(h("button", { type: "button", class: "ghost", text: "刪除這項固定收入" }), "刪除", async () => {
+      const list = S.incomeSources.filter((x) => x.id !== src.id);
+      await store.setSetting("incomeSources", list); S.incomeSources = list; closeSheet(); render(); toast("已刪除，過去的收入紀錄不受影響");
+    }));
+    openSheet(src ? src.name : "新增固定收入", body);
+  }
+
+  function receiveSheet(src, mk) {
+    const due = sourceDate(src, mk);
+    const amount = h("input", { id: "rcAmt", type: "number", inputmode: "numeric", min: "0", step: "1", value: src.amount || "", placeholder: "0" });
+    const date = h("input", { id: "rcDate", type: "date", value: mk === monthOf(today()) && today() < due ? today() : due });
+    const acc = h("select", { id: "rcAcc" }, options(accountsSorted().map((a) => [a.id, a.name]), src.account));
+    const note = h("input", { id: "rcNote", type: "text", maxlength: "80", value: src.name });
+    const m = h("div", { class: "msg" });
+    const btn = h("button", { type: "button", class: "primary block", text: "記入帳" });
+    btn.onclick = async () => {
+      const a = Math.round(num(amount.value));
+      if (!(a > 0)) { m.textContent = "請輸入金額。"; m.classList.add("err"); return; }
+      if (!isDate(date.value)) { m.textContent = "請選擇日期。"; m.classList.add("err"); return; }
+      try {
+        await save("tx", { id: newId(), type: "in", amount: a, date: date.value, category: src.category, account: acc.value, note: note.value.trim(), sourceId: src.id, createdAt: new Date().toISOString() });
+        closeSheet(); render(); toast(`已記入 ${src.name} ${fmt(a)}`);
+      } catch { m.textContent = "沒有存成功，請再試一次。"; m.classList.add("err"); }
+    };
+    openSheet(`${src.name}入帳`, [
+      h("div", { class: "row-2" }, h("label", { class: "field amt" }, h("span", { text: "金額 (NT$)" }), amount), field("入帳日期", date)),
+      field("存入帳戶", acc), field("備註", note), btn, m,
+      h("p", { class: "small muted", text: "會記成「記帳」裡的一筆收入，帳戶餘額和總資產也會一起更新。" }),
+    ]);
+  }
+
   /* ---------- Live closing prices ----------
      1. data/prices.json, refreshed after each close by a GitHub Action (上市 + 上櫃)
      2. the same file straight from GitHub, in case the Pages copy lags behind
@@ -1519,7 +1718,7 @@
     const data = {
       app: "xiao-zhangben", version: 2, exportedAt: new Date().toISOString(),
       tx: S.tx, accounts: S.accounts, trades: S.trades, trips: S.trips, tripx: S.tripx, snaps: S.snaps,
-      settings: { budget: S.budget, quotes: S.quotes, feeCfg: S.feeCfg },
+      settings: { budget: S.budget, quotes: S.quotes, feeCfg: S.feeCfg, incomeSources: S.incomeSources },
     };
     const ok = await saveFile(`小帳本備份-${today()}.json`, JSON.stringify(data, null, 1), "application/json");
     if (ok) {
@@ -1546,7 +1745,7 @@
   const okId = (r) => r && typeof r.id === "string" && r.id.length > 0 && r.id.length < 100;
   const CLEAN = {
     tx: (r) => okId(r) && ["in", "out", "transfer"].includes(r.type) && Number(r.amount) > 0 && isDate(r.date)
-      ? { id: r.id, type: r.type, amount: Math.round(Number(r.amount)), date: r.date, category: str(r.category, 20) || "其他", note: str(r.note), account: str(r.account, 100) || null, toAccount: r.type === "transfer" ? str(r.toAccount, 100) : undefined, tripId: str(r.tripId, 100) || undefined, settlePay: str(r.settlePay, 20) || undefined, settleForeign: Number(r.settleForeign) || undefined, createdAt: str(r.createdAt, 40) || undefined } : null,
+      ? { id: r.id, type: r.type, amount: Math.round(Number(r.amount)), date: r.date, category: str(r.category, 20) || "其他", note: str(r.note), account: str(r.account, 100) || null, toAccount: r.type === "transfer" ? str(r.toAccount, 100) : undefined, tripId: str(r.tripId, 100) || undefined, settlePay: str(r.settlePay, 20) || undefined, sourceId: str(r.sourceId, 100) || undefined, settleForeign: Number(r.settleForeign) || undefined, createdAt: str(r.createdAt, 40) || undefined } : null,
     accounts: (r) => okId(r) && str(r.name, 20)
       ? { id: r.id, name: str(r.name, 20), kind: ACCOUNT_KINDS[r.kind] ? r.kind : "other", opening: Math.round(Number(r.opening) || 0), order: Number(r.order) || 0, createdAt: str(r.createdAt, 40) || undefined } : null,
     trades: (r) => okId(r) && TRADE_KINDS[r.kind] && isDate(r.date) && str(r.symbol, 10)
@@ -1599,6 +1798,16 @@
           for (const [k, v] of Object.entries(st.quotes)) if (v && Number(v.price) > 0 && (!q[k] || (v.at || "") > (q[k].at || ""))) q[k] = { price: Number(v.price), at: str(v.at, 40) };
           await store.setSetting("quotes", q);
         }
+        if (Array.isArray(st.incomeSources)) {
+          const list = [...S.incomeSources];
+          for (const x of st.incomeSources) {
+            if (!x || !okId(x) || !str(x.name, 20)) continue;
+            const rec = { id: x.id, name: str(x.name, 20), category: CATS.in.includes(x.category) ? x.category : "其他", amount: Math.max(0, Math.round(Number(x.amount) || 0)), day: Math.min(31, Math.max(1, Math.round(Number(x.day) || 1))), account: str(x.account, 100) };
+            const i = list.findIndex((y) => y.id === rec.id);
+            if (i >= 0) list[i] = rec; else list.push(rec);
+          }
+          await store.setSetting("incomeSources", list);
+        }
         if (st.feeCfg && Number(st.feeCfg.discount) > 0) await store.setSetting("feeCfg", { discount: Number(st.feeCfg.discount), minFee: Math.max(0, Number(st.feeCfg.minFee) || 0) });
         await loadAll();
         await applyMarket();
@@ -1618,14 +1827,15 @@
     else if (S.tab === "assets") renderAssets();
     else if (S.tab === "stocks") renderStocks();
     else if (S.tab === "trips") renderTrips();
+    else if (S.tab === "income") renderIncome();
     renderBackupInfo();
   }
 
   async function loadAll() {
-    const [tx, accounts, trades, trips, tripx, snaps, budget, lastBackup, quotes, feeCfg, market, marketAt] = await Promise.all([
+    const [tx, accounts, trades, trips, tripx, snaps, budget, lastBackup, quotes, feeCfg, market, marketAt, incomeSources] = await Promise.all([
       store.all("tx"), store.all("accounts"), store.all("trades"), store.all("trips"), store.all("tripx"), store.all("snaps"),
       store.getSetting("budget"), store.getSetting("lastBackup"), store.getSetting("quotes"), store.getSetting("feeCfg"),
-      store.getSetting("market"), store.getSetting("marketAt"),
+      store.getSetting("market"), store.getSetting("marketAt"), store.getSetting("incomeSources"),
     ]);
     S.accounts = accounts || [];
     if (!S.accounts.length) {
@@ -1648,6 +1858,7 @@
     S.quotes = quotes || {};
     S.market = market && typeof market === "object" ? market : {};
     S.marketAt = marketAt || null;
+    S.incomeSources = Array.isArray(incomeSources) ? incomeSources : [];
     if (feeCfg && feeCfg.discount > 0) S.feeCfg = feeCfg;
   }
 

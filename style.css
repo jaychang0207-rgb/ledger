@@ -210,7 +210,7 @@ h2 { font-size: 13px; margin: 0; color: var(--muted); font-weight: 500; letter-s
 /* ---------- tab bar ---------- */
 .tabbar {
   position: fixed; z-index: 30; left: 0; right: 0; bottom: 0;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   background: var(--tabbar); border-top: 1px solid var(--line);
   -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -254,3 +254,14 @@ h2 { font-size: 13px; margin: 0; color: var(--muted); font-weight: 500; letter-s
 .hist-detail { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
 .hist-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
 .rowbtn.picked { background: var(--accent-soft); }
+
+/* ---------- 收入 ---------- */
+.src-row { cursor: default; }
+.src-row:active { background: transparent; }
+.src-name { border: 0; background: none; padding: 0; text-align: left; display: grid; gap: 2px; min-width: 0; color: inherit; }
+.src-name .name { display: flex; align-items: center; gap: 8px; }
+.check { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--line); display: inline-grid; place-items: center; font-size: 12px; flex: none; }
+.check.on { background: var(--in); border-color: var(--in); color: var(--surface); font-weight: 700; }
+.primary.small-btn { min-height: 34px; padding: 0 14px; font-size: 14px; }
+.icon-btn:disabled { opacity: .35; }
+.rowbtn .name + .meta { display: block; }
